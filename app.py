@@ -4,6 +4,7 @@ from groq import Groq
 from dotenv import load_dotenv
 import os
 import yt_dlp
+import tempfile
 
 # Load environment variables
 load_dotenv()
@@ -30,7 +31,7 @@ def get_video_id(url):
         raise ValueError("Invalid YouTube URL")
 
 # Function to download audio using yt-dlp
-def download_audio(video_url, proxy=None):
+def download_audio(video_url, proxy=None, cookies_file=None):
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -40,15 +41,18 @@ def download_audio(video_url, proxy=None):
         }],
         'outtmpl': 'audio.%(ext)s',
         'quiet': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
     if proxy:
         ydl_opts['proxy'] = proxy
+    if cookies_file:
+        ydl_opts['cookiefile'] = cookies_file
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
     return 'audio.mp3'
 
 # Function to get transcript (with fallback to Whisper)
-def get_transcript(video_id, languages=['en'], fallback=False, video_url=None, proxy=None):
+def get_transcript(video_id, languages=['en'], fallback=False, video_url=None, proxy=None, cookies_file=None):
     try:
         api = YouTubeTranscriptApi(proxies={"http": proxy, "https": proxy} if proxy else None)
         transcript = api.fetch(video_id, languages=languages)
@@ -58,7 +62,7 @@ def get_transcript(video_id, languages=['en'], fallback=False, video_url=None, p
         if fallback and video_url:
             st.info("No subtitles available. Falling back to audio transcription using Groq Whisper...")
             try:
-                audio_file = download_audio(video_url, proxy)
+                audio_file = download_audio(video_url, proxy, cookies_file)
                 with open(audio_file, "rb") as file:
                     transcription = client.audio.transcriptions.create(
                         file=file,
@@ -89,10 +93,10 @@ def format_transcript(raw_transcript):
     return formatted
 
 # Function to generate summary using Groq with streaming
-def generate_summary(transcript, custom_prompt="Summarize the following transcript:"):
+def generate_summary(transcript, custom_prompt="Summarize the following transcript:", model="mixtral-8x7b-32768"):
     content = f"{custom_prompt} {transcript}"
     completion = client.chat.completions.create(
-        model="openai/gpt-oss-120b",  # As per your specified model; adjust if it's not available on Groq
+        model=model,  # Changed to a valid Groq model; adjust as needed
         messages=[
             {
                 "role": "user",
@@ -100,9 +104,8 @@ def generate_summary(transcript, custom_prompt="Summarize the following transcri
             }
         ],
         temperature=1,
-        max_completion_tokens=8192,
+        max_tokens=8192,
         top_p=1,
-        reasoning_effort="medium",
         stream=True,
         stop=None
     )
@@ -116,14 +119,14 @@ def generate_summary(transcript, custom_prompt="Summarize the following transcri
     summary_placeholder.markdown(summary)  # Final update without cursor
     return summary
 
-# Streamlit UI - Further improved with better layout, colors, and options
+# Streamlit UI
 st.set_page_config(page_title="YouTube Transcript Summarizer", page_icon="🎥", layout="wide")
 
 st.title("🎥 YouTube Transcript Summarizer")
 st.markdown("""
 This app fetches the transcript from a YouTube video (using subtitles if available, or audio transcription as fallback) and generates a real-time AI summary using Groq. 
 You can choose to generate a summary or just view the transcript. The complete transcript is always shown in a formatted way with timestamps!
-If you encounter 403 errors or IP blocks, try using a proxy (e.g., from a VPN service).
+If you encounter 403 errors, try providing a cookies file (export from your browser using a plugin like Get cookies.txt) or a proxy. Running the app locally often resolves IP blocks.
 """)
 
 # Sidebar for options
@@ -138,10 +141,13 @@ with st.sidebar:
                                          help="If no subtitles are available, automatically transcribe the audio. Requires yt-dlp and may take time.")
     proxy = st.text_input("Optional Proxy (for IP blocks)", placeholder="http://user:pass@ip:port",
                           help="Use a proxy to bypass YouTube IP restrictions. Useful if running on cloud platforms.")
+    cookies_upload = st.file_uploader("Upload cookies.txt (for 403 errors)", type="txt",
+                                      help="Export cookies from your browser (use extension like 'Get cookies.txt LOCALLY') and upload to bypass restrictions.")
+    model = st.selectbox("Groq Model", options=["mixtral-8x7b-32768", "llama3-70b-8192", "gemma-7b-it"], index=0,
+                         help="Select the Groq model for summarization.")
     st.markdown("---")
     st.caption("Powered by YouTube Transcript API, yt-dlp, Groq AI & Whisper")
-    st.caption("Note: If the model 'openai/gpt-oss-120b' is unavailable, update it in app.py to a valid Groq model like 'llama3-70b-8192'.")
-    st.caption("Ensure ffmpeg is installed for audio processing. For persistent errors, run the app locally instead of on cloud.")
+    st.caption("Ensure ffmpeg is installed for audio processing. For persistent errors, run the app locally.")
 
 # Main content
 col1, col2 = st.columns([3, 1])
@@ -150,13 +156,19 @@ with col1:
 
 if st.button("Process Video", use_container_width=True):
     if video_url:
+        cookies_file = None
+        if cookies_upload:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".txt") as tmp:
+                tmp.write(cookies_upload.read())
+                cookies_file = tmp.name
+
         with st.spinner("Extracting video ID and fetching transcript..."):
             try:
                 video_id = get_video_id(video_url)
                 if not video_id:
                     st.stop()
                 transcript_text, raw_transcript = get_transcript(video_id, languages if languages else ['en'], 
-                                                                fallback=fallback_transcription, video_url=video_url, proxy=proxy)
+                                                                fallback=fallback_transcription, video_url=video_url, proxy=proxy, cookies_file=cookies_file)
                 st.success("Transcript obtained successfully!")
                 
                 # Always display formatted transcript in a good way
@@ -175,7 +187,7 @@ if st.button("Process Video", use_container_width=True):
                 # Generate summary if option is selected
                 if generate_summary_option:
                     st.subheader("Generating Summary...")
-                    summary = generate_summary(transcript_text, custom_prompt)
+                    summary = generate_summary(transcript_text, custom_prompt, model)
                     
                     st.subheader("AI-Generated Summary")
                     st.markdown(summary)
@@ -184,11 +196,14 @@ if st.button("Process Video", use_container_width=True):
                     st.button("Copy Summary", on_click=lambda: st.session_state.update({"summary": summary}))
                     if "summary" in st.session_state:
                         st.code(st.session_state["summary"], language="text")
+
+                if cookies_file:
+                    os.unlink(cookies_file)  # Clean up temp file
             except ValueError as ve:
                 st.error(str(ve))
-                st.info("Tip: Some videos may not have transcripts available. Enable 'Fallback to Audio Transcription' or try a different video. For 403 errors, provide a proxy or run locally.")
+                st.info("Tip: For 403 errors, try uploading a cookies.txt file from your browser or using a proxy. Alternatively, run the app locally.")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}")
-                st.info("If the error persists, ensure the video has public access, try a proxy, or verify yt-dlp compatibility.")
+                st.info("If the error persists, ensure the video has public access, try cookies/proxy, or verify yt-dlp compatibility.")
     else:
         st.warning("Please enter a valid YouTube video link.")
