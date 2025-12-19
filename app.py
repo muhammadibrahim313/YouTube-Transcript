@@ -3,6 +3,7 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from groq import Groq
 from dotenv import load_dotenv
 import os
+import yt_dlp
 
 # Load environment variables
 load_dotenv()
@@ -28,22 +29,58 @@ def get_video_id(url):
     else:
         raise ValueError("Invalid YouTube URL")
 
-# Function to get transcript
-def get_transcript(video_id, languages=['en']):
+# Function to download audio using yt-dlp
+def download_audio(video_url):
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'outtmpl': 'audio.%(ext)s',
+        'quiet': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([video_url])
+    return 'audio.mp3'
+
+# Function to get transcript (with fallback to Whisper)
+def get_transcript(video_id, languages=['en'], fallback=False, video_url=None):
     try:
         api = YouTubeTranscriptApi()
         transcript = api.fetch(video_id, languages=languages)
         full_text = " ".join([entry['text'] for entry in transcript])
         return full_text, transcript  # Return both plain text and raw for formatted display
     except Exception as e:
-        raise ValueError(f"Could not fetch transcript: {str(e)}")
+        if fallback and video_url:
+            st.info("No subtitles available. Falling back to audio transcription using Groq Whisper...")
+            audio_file = download_audio(video_url)
+            with open(audio_file, "rb") as file:
+                transcription = client.audio.transcriptions.create(
+                    file=file,
+                    model="whisper-large-v3",
+                    response_format="verbose_json",
+                    timestamp_granularities=["segment"]
+                )
+            full_text = transcription.text
+            raw_transcript = transcription.segments  # List of {'start': float, 'end': float, 'text': str}
+            os.remove(audio_file)  # Clean up
+            return full_text, raw_transcript
+        else:
+            raise ValueError(f"Could not fetch transcript: {str(e)}")
 
 # Function to format transcript with timestamps
 def format_transcript(raw_transcript):
     formatted = ""
     for entry in raw_transcript:
-        start_time = f"{int(entry['start'] // 60):02d}:{int(entry['start'] % 60):02d}"
-        formatted += f"[{start_time}] {entry['text']}\n"
+        if 'start' in entry and 'end' in entry:  # For Whisper format
+            start_time = f"{int(entry['start'] // 60):02d}:{int(entry['start'] % 60):02d}"
+            end_time = f"{int(entry['end'] // 60):02d}:{int(entry['end'] % 60):02d}"
+            formatted += f"[{start_time} - {end_time}] {entry['text']}\n"
+        else:  # For YouTube format
+            start_time = f"{int(entry['start'] // 60):02d}:{int(entry['start'] % 60):02d}"
+            formatted += f"[{start_time}] {entry['text']}\n"
     return formatted
 
 # Function to generate summary using Groq with streaming
@@ -74,12 +111,12 @@ def generate_summary(transcript, custom_prompt="Summarize the following transcri
     summary_placeholder.markdown(summary)  # Final update without cursor
     return summary
 
-# Streamlit UI - Improved with sidebar, options, and better layout
+# Streamlit UI - Further improved with better layout, colors, and options
 st.set_page_config(page_title="YouTube Transcript Summarizer", page_icon="🎥", layout="wide")
 
 st.title("🎥 YouTube Transcript Summarizer")
 st.markdown("""
-This app fetches the transcript from a YouTube video and generates a real-time AI summary using Groq. 
+This app fetches the transcript from a YouTube video (using subtitles if available, or audio transcription as fallback) and generates a real-time AI summary using Groq. 
 You can choose to generate a summary or just view the transcript. The complete transcript is always shown in a formatted way with timestamps!
 """)
 
@@ -91,9 +128,12 @@ with st.sidebar:
     custom_prompt = st.text_input("Custom Summary Prompt", value="Summarize the following transcript:",
                                   help="Customize the prompt sent to the AI for summarization, e.g., 'Summarize key points from:'")
     generate_summary_option = st.checkbox("Generate AI Summary", value=True, help="Uncheck if you only want the transcript.")
+    fallback_transcription = st.checkbox("Fallback to Audio Transcription (Groq Whisper)", value=True, 
+                                         help="If no subtitles are available, automatically transcribe the audio. Requires yt-dlp and may take time.")
     st.markdown("---")
-    st.caption("Powered by YouTube Transcript API & Groq AI")
+    st.caption("Powered by YouTube Transcript API, yt-dlp, Groq AI & Whisper")
     st.caption("Note: If the model 'openai/gpt-oss-120b' is unavailable, update it in app.py to a valid Groq model like 'llama3-70b-8192'.")
+    st.caption("Ensure ffmpeg is installed for audio processing.")
 
 # Main content
 col1, col2 = st.columns([3, 1])
@@ -107,8 +147,9 @@ if st.button("Process Video", use_container_width=True):
                 video_id = get_video_id(video_url)
                 if not video_id:
                     st.stop()
-                transcript_text, raw_transcript = get_transcript(video_id, languages if languages else ['en'])
-                st.success("Transcript fetched successfully!")
+                transcript_text, raw_transcript = get_transcript(video_id, languages if languages else ['en'], 
+                                                                fallback=fallback_transcription, video_url=video_url)
+                st.success("Transcript obtained successfully!")
                 
                 # Always display formatted transcript in a good way
                 st.subheader("Complete Transcript (with Timestamps)")
@@ -137,9 +178,9 @@ if st.button("Process Video", use_container_width=True):
                         st.code(st.session_state["summary"], language="text")
             except ValueError as ve:
                 st.error(str(ve))
-                st.info("Tip: Some videos may not have transcripts available. Try a different video or check if subtitles are enabled.")
+                st.info("Tip: Some videos may not have transcripts available. Enable 'Fallback to Audio Transcription' or try a different video.")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}")
-                st.info("If the error persists, ensure the video has public subtitles.")
+                st.info("If the error persists, ensure the video has public access and try again.")
     else:
         st.warning("Please enter a valid YouTube video link.")
