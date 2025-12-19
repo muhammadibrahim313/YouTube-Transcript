@@ -20,26 +20,33 @@ def get_video_id(url):
     if "youtu.be" in url:
         return url.split("/")[-1].split("?")[0]
     elif "youtube.com" in url:
-        return url.split("v=")[1].split("&")[0]
+        if "v=" in url:
+            return url.split("v=")[1].split("&")[0]
+        elif "list=" in url:
+            st.warning("Playlists are not supported. Please provide a single video link.")
+            return None
     else:
         raise ValueError("Invalid YouTube URL")
 
 # Function to get transcript
-def get_transcript(video_id):
+def get_transcript(video_id, languages=['en']):
     try:
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
-        return " ".join([entry['text'] for entry in transcript])
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id, languages=languages)
+        full_text = " ".join([entry['text'] for entry in transcript])
+        return full_text, transcript  # Return both plain text and raw for potential use
     except Exception as e:
         raise ValueError(f"Could not fetch transcript: {str(e)}")
 
-# Function to generate summary using Groq
-def generate_summary(transcript):
+# Function to generate summary using Groq with streaming
+def generate_summary(transcript, custom_prompt="Summarize the following transcript:"):
+    content = f"{custom_prompt} {transcript}"
     completion = client.chat.completions.create(
-        model="openai/gpt-oss-120b",  # Use the model you specified; adjust if needed
+        model="openai/gpt-oss-120b",  # As per your specified model; adjust if it's not available on Groq
         messages=[
             {
                 "role": "user",
-                "content": f"Summarize the following transcript: {transcript}"
+                "content": content
             }
         ],
         temperature=1,
@@ -55,34 +62,64 @@ def generate_summary(transcript):
     for chunk in completion:
         content = chunk.choices[0].delta.content or ""
         summary += content
-        summary_placeholder.markdown(summary)  # Stream the output in real-time
+        summary_placeholder.markdown(summary + " ▌")  # Add cursor for streaming effect
+    summary_placeholder.markdown(summary)  # Final update without cursor
     return summary
 
-# Streamlit UI
-st.title("YouTube Transcript Summarizer")
+# Streamlit UI - Improved with sidebar, options, and better layout
+st.set_page_config(page_title="YouTube Transcript Summarizer", page_icon="🎥", layout="wide")
 
+st.title("🎥 YouTube Transcript Summarizer")
 st.markdown("""
-Enter a YouTube video link below to fetch its transcript and generate a real-time summary using Groq AI.
+This app fetches the transcript from a YouTube video and generates a real-time AI summary using Groq. 
+Enter the video link below and customize your summary!
 """)
 
-video_url = st.text_input("YouTube Video Link", placeholder="https://youtu.be/VIDEO_ID")
+# Sidebar for options
+with st.sidebar:
+    st.header("Settings")
+    languages = st.multiselect("Preferred Languages", options=['en', 'de', 'fr', 'es', 'it', 'ja', 'ko', 'zh', 'other'], default=['en'],
+                               help="Select languages in priority order. Defaults to English.")
+    custom_prompt = st.text_input("Custom Summary Prompt", value="Summarize the following transcript:",
+                                  help="Customize the prompt sent to the AI for summarization, e.g., 'Summarize key points from:'")
+    st.markdown("---")
+    st.caption("Powered by YouTube Transcript API & Groq AI")
+    st.caption("Note: If the model 'openai/gpt-oss-120b' is unavailable, update it in app.py to a valid Groq model like 'llama3-70b-8192'.")
 
-if st.button("Generate Summary"):
+# Main content
+col1, col2 = st.columns([3, 1])
+with col1:
+    video_url = st.text_input("YouTube Video Link", placeholder="https://youtu.be/VIDEO_ID or https://www.youtube.com/watch?v=VIDEO_ID")
+
+if st.button("Generate Summary", use_container_width=True):
     if video_url:
-        with st.spinner("Fetching transcript..."):
+        with st.spinner("Extracting video ID and fetching transcript..."):
             try:
                 video_id = get_video_id(video_url)
-                transcript = get_transcript(video_id)
+                if not video_id:
+                    st.stop()
+                transcript_text, raw_transcript = get_transcript(video_id, languages if languages else ['en'])
                 st.success("Transcript fetched successfully!")
                 
-                st.subheader("Generating Summary...")
-                summary = generate_summary(transcript)
+                # Display transcript in expander
+                with st.expander("View Full Transcript", expanded=False):
+                    st.text_area("Transcript", transcript_text, height=300)
                 
-                st.subheader("Full Summary")
+                st.subheader("Generating Summary...")
+                summary = generate_summary(transcript_text, custom_prompt)
+                
+                st.subheader("AI-Generated Summary")
                 st.markdown(summary)
+                
+                # Add copy button for summary
+                st.button("Copy Summary", on_click=lambda: st.session_state.update({"summary": summary}))
+                if "summary" in st.session_state:
+                    st.code(st.session_state["summary"], language="text")
             except ValueError as ve:
                 st.error(str(ve))
+                st.info("Tip: Some videos may not have transcripts available. Try a different video or check if subtitles are enabled.")
             except Exception as e:
-                st.error(f"An error occurred: {str(e)}")
+                st.error(f"An unexpected error occurred: {str(e)}")
+                st.info("If the error persists, ensure the video has public subtitles.")
     else:
-        st.warning("Please enter a valid YouTube link.")
+        st.warning("Please enter a valid YouTube video link.")
