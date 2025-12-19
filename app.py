@@ -30,7 +30,7 @@ def get_video_id(url):
         raise ValueError("Invalid YouTube URL")
 
 # Function to download audio using yt-dlp
-def download_audio(video_url):
+def download_audio(video_url, proxy=None):
     ydl_opts = {
         'format': 'bestaudio/best',
         'postprocessors': [{
@@ -41,32 +41,37 @@ def download_audio(video_url):
         'outtmpl': 'audio.%(ext)s',
         'quiet': True,
     }
+    if proxy:
+        ydl_opts['proxy'] = proxy
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.download([video_url])
     return 'audio.mp3'
 
 # Function to get transcript (with fallback to Whisper)
-def get_transcript(video_id, languages=['en'], fallback=False, video_url=None):
+def get_transcript(video_id, languages=['en'], fallback=False, video_url=None, proxy=None):
     try:
-        api = YouTubeTranscriptApi()
+        api = YouTubeTranscriptApi(proxies={"http": proxy, "https": proxy} if proxy else None)
         transcript = api.fetch(video_id, languages=languages)
         full_text = " ".join([entry['text'] for entry in transcript])
         return full_text, transcript  # Return both plain text and raw for formatted display
     except Exception as e:
         if fallback and video_url:
             st.info("No subtitles available. Falling back to audio transcription using Groq Whisper...")
-            audio_file = download_audio(video_url)
-            with open(audio_file, "rb") as file:
-                transcription = client.audio.transcriptions.create(
-                    file=file,
-                    model="whisper-large-v3",
-                    response_format="verbose_json",
-                    timestamp_granularities=["segment"]
-                )
-            full_text = transcription.text
-            raw_transcript = transcription.segments  # List of {'start': float, 'end': float, 'text': str}
-            os.remove(audio_file)  # Clean up
-            return full_text, raw_transcript
+            try:
+                audio_file = download_audio(video_url, proxy)
+                with open(audio_file, "rb") as file:
+                    transcription = client.audio.transcriptions.create(
+                        file=file,
+                        model="whisper-large-v3",
+                        response_format="verbose_json",
+                        timestamp_granularities=["segment"]
+                    )
+                full_text = transcription.text
+                raw_transcript = transcription.segments  # List of {'start': float, 'end': float, 'text': str}
+                os.remove(audio_file)  # Clean up
+                return full_text, raw_transcript
+            except Exception as download_e:
+                raise ValueError(f"Failed to download audio for transcription: {str(download_e)}")
         else:
             raise ValueError(f"Could not fetch transcript: {str(e)}")
 
@@ -118,6 +123,7 @@ st.title("🎥 YouTube Transcript Summarizer")
 st.markdown("""
 This app fetches the transcript from a YouTube video (using subtitles if available, or audio transcription as fallback) and generates a real-time AI summary using Groq. 
 You can choose to generate a summary or just view the transcript. The complete transcript is always shown in a formatted way with timestamps!
+If you encounter 403 errors or IP blocks, try using a proxy (e.g., from a VPN service).
 """)
 
 # Sidebar for options
@@ -130,10 +136,12 @@ with st.sidebar:
     generate_summary_option = st.checkbox("Generate AI Summary", value=True, help="Uncheck if you only want the transcript.")
     fallback_transcription = st.checkbox("Fallback to Audio Transcription (Groq Whisper)", value=True, 
                                          help="If no subtitles are available, automatically transcribe the audio. Requires yt-dlp and may take time.")
+    proxy = st.text_input("Optional Proxy (for IP blocks)", placeholder="http://user:pass@ip:port",
+                          help="Use a proxy to bypass YouTube IP restrictions. Useful if running on cloud platforms.")
     st.markdown("---")
     st.caption("Powered by YouTube Transcript API, yt-dlp, Groq AI & Whisper")
     st.caption("Note: If the model 'openai/gpt-oss-120b' is unavailable, update it in app.py to a valid Groq model like 'llama3-70b-8192'.")
-    st.caption("Ensure ffmpeg is installed for audio processing.")
+    st.caption("Ensure ffmpeg is installed for audio processing. For persistent errors, run the app locally instead of on cloud.")
 
 # Main content
 col1, col2 = st.columns([3, 1])
@@ -148,7 +156,7 @@ if st.button("Process Video", use_container_width=True):
                 if not video_id:
                     st.stop()
                 transcript_text, raw_transcript = get_transcript(video_id, languages if languages else ['en'], 
-                                                                fallback=fallback_transcription, video_url=video_url)
+                                                                fallback=fallback_transcription, video_url=video_url, proxy=proxy)
                 st.success("Transcript obtained successfully!")
                 
                 # Always display formatted transcript in a good way
@@ -178,9 +186,9 @@ if st.button("Process Video", use_container_width=True):
                         st.code(st.session_state["summary"], language="text")
             except ValueError as ve:
                 st.error(str(ve))
-                st.info("Tip: Some videos may not have transcripts available. Enable 'Fallback to Audio Transcription' or try a different video.")
+                st.info("Tip: Some videos may not have transcripts available. Enable 'Fallback to Audio Transcription' or try a different video. For 403 errors, provide a proxy or run locally.")
             except Exception as e:
                 st.error(f"An unexpected error occurred: {str(e)}")
-                st.info("If the error persists, ensure the video has public access and try again.")
+                st.info("If the error persists, ensure the video has public access, try a proxy, or verify yt-dlp compatibility.")
     else:
         st.warning("Please enter a valid YouTube video link.")
